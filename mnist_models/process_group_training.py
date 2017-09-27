@@ -43,8 +43,7 @@ def average_gradients(tower_grads):
       if g is not None:
         # Add 0 dimension to the gradients to represent the tower.
         expanded_g = tf.expand_dims(g, 0)
-    #   else:
-    #     expanded_g = tf.expand_dims(tf.Variable(0), 0)
+
         # Append on a 'tower' dimension which we will average over below.
         grads.append(expanded_g)
 
@@ -66,12 +65,67 @@ def average_gradients(tower_grads):
 def accumulate_gradient_to_var(ps_num, average_grads):
     """
     Create a assign_op for given ps.
-    Assign gradients
+    Assign gradients to the copy on each ps in order to accumulate gradients.
+    This is used to model communication step.
     """
     layer_1_vars = tf.get_collection(scope='copy_layer1_{0}'.format(ps_num), key=tf.GraphKeys.TRAINABLE_VARIABLES)
     layer_2_vars = tf.get_collection(scope='copy_layer2_{0}'.format(ps_num), key=tf.GraphKeys.TRAINABLE_VARIABLES)
 
+    all_vars = layer_1_vars + layer_2_vars
 
+    # update_target_fn will be called everytime when new averaged_grads arrives at the ps.
+    update_target_fn = []
+
+    for tup in zip(average_grads, all_vars):
+        grad, _ = tup[0]
+        copy_target = tup[1]
+        # add var to tensor
+        update_target_fn.append(tf.assign_add(copy_target, grad))
+
+    update_target_fn = tf.group(*update_target_fn)
+    return update_target_fn
+
+def update_var(ps_num):
+
+    copied_layer_1_vars = tf.get_collection(scope='copy_layer1_{0}'.format(ps_num), key=tf.GraphKeys.TRAINABLE_VARIABLES)
+    copied_layer_2_vars = tf.get_collection(scope='copy_layer2_{0}'.format(ps_num), key=tf.GraphKeys.TRAINABLE_VARIABLES)
+
+    copied_vars = copied_layer_1_vars + copied_layer_2_vars #
+
+    target_layer_1_vars = tf.get_collection(scope='copy_layer1_2', key=tf.GraphKeys.TRAINABLE_VARIABLES)
+    target_layer_2_vars = tf.get_collection(scope='copy_layer2_2', key=tf.GraphKeys.TRAINABLE_VARIABLES)
+
+    target_vars = target_layer_1_vars + target_layer_2_vars
+
+    graph_layer_1_vars = tf.get_collection(scope='layer1_{0}'.format(ps_num), key=tf.GraphKeys.TRAINABLE_VARIABLES)
+    graph_layer_2_vars = tf.get_collection(scope='layer2_{0}'.format(ps_num), key=tf.GraphKeys.TRAINABLE_VARIABLES)
+
+    graph_vars = graph_layer_1_vars + graph_layer_2_vars
+
+    # update_target_fn will be called periodically to add accumulated grads in each ps group to center ps.
+    update_target_fn = []
+
+    # Update first
+    for grad, target in zip(copied_vars, target_vars):
+        update_target_fn.append(tf.assign_add(target, grad))
+    # print(update_target_fn)
+
+    # Zero out then
+    for var in copied_vars:
+        update_target_fn.append(tf.assign_add(
+            var,
+            tf.zeros(shape=var.shape)
+        ))
+    # print(update_target_fn)
+    # Fetch variable thirdly.
+    # print(target_vars, graph_vars)
+    for source, target in zip(target_vars, graph_vars):
+        update_target_fn.append(tf.assign(target, source))
+
+    print(update_target_fn)
+
+    update_target_fn = tf.group(*update_target_fn)
+    return update_target_fn
 
 def inference(x, ps_num, is_copy=False):
 
@@ -141,7 +195,6 @@ def main(_):
 
   with tf.device("/job:ps/task:2"):
       accumulated_vars = inference(None, 2, is_copy=True)
-      pass
 
 
   # Build the graph for two different worker, using the same params.
@@ -178,24 +231,18 @@ def main(_):
       average_grads_0 = average_gradients(gradients_0)
       train_op_0 = opt_0.apply_gradients(average_grads_0, global_step=global_step_0)
 
-      accumulate_op_0 = accumulate_gradient_to_var(ps_num=0, average_grads_0)
+      accumulate_op_0 = accumulate_gradient_to_var(ps_num=0, average_grads=average_grads_0)
+      update_op_0 = update_var(0) # Shall run it each 5 steps
 
 
   with tf.device("job:ps/task:1"):
       average_grads_1 = average_gradients(gradients_1)
       train_op_1 = opt_1.apply_gradients(average_grads_1, global_step=global_step_1)
 
-      accumulate_op_1 = accumulate_gradient_to_var(ps_num=1, average_grads_1)
+      accumulate_op_1 = accumulate_gradient_to_var(ps_num=1, average_grads=average_grads_1)
+      update_op_1 = update_var(1) # Shall run it each 5 steps
 
-  print(average_grads_0[0][1].device)
-  print(average_grads_1[0][1].device)
-
-  print(average_grads_0, layer_1_vars, layer_2_vars)
-
-  # Apply the gradients to adjust the shared variables.
-  train_op = opt.apply_gradients(average_grads, global_step=global_step)
-
-  # train_op = opt.minimize(loss, global_step=global_step)
+  # Now that we have train_op_i, accumulate_op_i, update_op_i
 
   saver = tf.train.Saver()
   summary_op = tf.summary.merge_all()
