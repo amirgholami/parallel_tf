@@ -20,6 +20,7 @@ tf.app.flags.DEFINE_integer("batch_size", 100, "Training batch size")
 FLAGS = tf.app.flags.FLAGS
 
 IMAGE_PIXELS = 28
+UPDATE_STEPS = 5
 def average_gradients(tower_grads):
   """Calculate the average gradient for each shared variable across all towers.
   Note that this function provides a synchronization point across all towers.
@@ -62,9 +63,33 @@ def average_gradients(tower_grads):
   # print(average_grads)
   return average_grads
 
+def accumulate_gradient_to_var(ps_num, average_grads):
+    """
+    Create a assign_op for given ps.
+    Assign gradients
+    """
+    layer_1_vars = tf.get_collection(scope='copy_layer1_{0}'.format(ps_num), key=tf.GraphKeys.TRAINABLE_VARIABLES)
+    layer_2_vars = tf.get_collection(scope='copy_layer2_{0}'.format(ps_num), key=tf.GraphKeys.TRAINABLE_VARIABLES)
 
-def inference(x, ps_num):
 
+
+def inference(x, ps_num, is_copy=False):
+
+  if is_copy:
+    with tf.variable_scope('copy_layer1_{0}'.format(ps_num)) as scope:
+        hid_w = tf.Variable(
+            tf.zeros([IMAGE_PIXELS * IMAGE_PIXELS, FLAGS.hidden_units]), name="hid_w")
+        hid_b = tf.Variable(tf.zeros([FLAGS.hidden_units]), name="hid_b")
+
+    # Variables of the softmax layer
+    with tf.variable_scope('copy_layer2_{0}'.format(ps_num)) as scope:
+        sm_w = tf.Variable(
+            tf.zeros([FLAGS.hidden_units, 10]),name="sm_w")
+        sm_b = tf.Variable(tf.zeros([10]), name="sm_b")
+
+        return [hid_w, hid_b, sm_w, sm_b]
+
+  else:
     with tf.variable_scope('layer1_{0}'.format(ps_num)) as scope:
         hid_w = tf.Variable(
             tf.truncated_normal([IMAGE_PIXELS * IMAGE_PIXELS, FLAGS.hidden_units],
@@ -101,11 +126,23 @@ def main(_):
       x0 = tf.placeholder(tf.float32, [None, IMAGE_PIXELS * IMAGE_PIXELS])
       y0_ = tf.placeholder(tf.float32, [None, 10])
       y0 = inference(x0, 0)
+      global_step_0 = tf.Variable(0)
+
+      # Use
+      accumulated_vars = inference(None, 0, is_copy=True)
 
   with tf.device("/job:ps/task:1"):
       x1 = tf.placeholder(tf.float32, [None, IMAGE_PIXELS * IMAGE_PIXELS])
       y1_ = tf.placeholder(tf.float32, [None, 10])
       y1 = inference(x1, 1)
+      global_step_1 = tf.Variable(0)
+
+      accumulated_vars = inference(None, 1, is_copy=True)
+
+  with tf.device("/job:ps/task:2"):
+      accumulated_vars = inference(None, 2, is_copy=True)
+      pass
+
 
   # Build the graph for two different worker, using the same params.
   for i in range(2):
@@ -113,9 +150,13 @@ def main(_):
           worker_device="/job:worker/task:%d" % i,
           cluster=cluster)):
 
-        loss_0 = -tf.reduce_sum(y0_ * tf.log(tf.clip_by_value(y0, 1e-10, 1.0)))
-        global_step_0 = tf.Variable(0)
+        # Update each 5 steps
+        # if global_step_0 % UPDATE_STEPS == 0:
+        # print(global_step_0 % UPDATE_STEPS)
+        # layer_1_vars = tf.get_collection(scope='layer1_1', key=tf.GraphKeys.TRAINABLE_VARIABLES)
+        # layer_2_vars = tf.get_collection(scope='layer2_1', key=tf.GraphKeys.TRAINABLE_VARIABLES)
 
+        loss_0 = -tf.reduce_sum(y0_ * tf.log(tf.clip_by_value(y0, 1e-10, 1.0)))
         opt_0 = tf.train.AdagradOptimizer(0.01)
 
         grad = opt_0.compute_gradients(loss_0)
@@ -127,9 +168,6 @@ def main(_):
       with tf.device(tf.train.replica_device_setter(worker_device="/job:worker/task:%d" % i,cluster=cluster)):
 
         loss_1 = -tf.reduce_sum(y1_ * tf.log(tf.clip_by_value(y1, 1e-10, 1.0)))
-
-        global_step_1 = tf.Variable(0)
-
         opt_1 = tf.train.AdagradOptimizer(0.01)
 
         grad = opt_1.compute_gradients(loss_1)
@@ -138,15 +176,21 @@ def main(_):
 
   with tf.device("job:ps/task:0"):
       average_grads_0 = average_gradients(gradients_0)
+      train_op_0 = opt_0.apply_gradients(average_grads_0, global_step=global_step_0)
+
+      accumulate_op_0 = accumulate_gradient_to_var(ps_num=0, average_grads_0)
+
 
   with tf.device("job:ps/task:1"):
       average_grads_1 = average_gradients(gradients_1)
+      train_op_1 = opt_1.apply_gradients(average_grads_1, global_step=global_step_1)
+
+      accumulate_op_1 = accumulate_gradient_to_var(ps_num=1, average_grads_1)
 
   print(average_grads_0[0][1].device)
   print(average_grads_1[0][1].device)
 
-  # Synchronize the grads
-  average_grads = average_gradients(gradients)
+  print(average_grads_0, layer_1_vars, layer_2_vars)
 
   # Apply the gradients to adjust the shared variables.
   train_op = opt.apply_gradients(average_grads, global_step=global_step)
