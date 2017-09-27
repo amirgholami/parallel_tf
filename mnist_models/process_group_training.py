@@ -122,7 +122,7 @@ def update_var(ps_num):
     for source, target in zip(target_vars, graph_vars):
         update_target_fn.append(tf.assign(target, source))
 
-    print(update_target_fn)
+    # print(update_target_fn)
 
     update_target_fn = tf.group(*update_target_fn)
     return update_target_fn
@@ -212,6 +212,9 @@ def main(_):
         loss_0 = -tf.reduce_sum(y0_ * tf.log(tf.clip_by_value(y0, 1e-10, 1.0)))
         opt_0 = tf.train.AdagradOptimizer(0.01)
 
+        correct_prediction = tf.equal(tf.argmax(y0_, 1), tf.argmax(y0, 1))
+        accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+
         grad = opt_0.compute_gradients(loss_0)
         gradients_0.append(grad)
 
@@ -259,7 +262,7 @@ def main(_):
                              init_op=init_op,
                              summary_op=summary_op,
                              saver=saver,
-                             global_step=global_step,
+                             global_step=global_step_0,
                              save_model_secs=600)
 
     mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
@@ -268,21 +271,41 @@ def main(_):
     # a checkpoint, and closing when done or an error occurs.
     with sv.managed_session(server.target) as sess:
       # Loop until the supervisor shuts down or 1000000 steps have completed.
-      step = 0
-      while not sv.should_stop() and step < 1000000:
+      step_0 = 0
+      while not sv.should_stop() and step_0 < 1000000:
         # Run a training step asynchronously.
         # See `tf.train.SyncReplicasOptimizer` for additional details on how to
         # perform *synchronous* training.
 
-        batch_xs, batch_ys = mnist.train.next_batch(FLAGS.batch_size)
-        train_feed = {x: batch_xs, y_: batch_ys}
+        if FLAGS.task_index == 0 or FLAGS.task_index == 1:
+            batch_xs_0, batch_ys_0 = mnist.train.next_batch(FLAGS.batch_size)
+            train_feed_0 = {x0: batch_xs_0, y0_: batch_ys_0}
 
-        _, step = sess.run([train_op, global_step], feed_dict=train_feed)
-        if step % 100 == 0:
-            # print(gradients)
-            print( "Done step %d" % step)
-            print("On iteration %d it reaches %f accuracy" % (step, sess.run(accuracy, feed_dict={x: mnist.test.images,
-                                                y_: mnist.test.labels})))
+            _, step_0, _ = sess.run([train_op_0, global_step_0, accumulate_op_0], feed_dict=train_feed_0)
+
+            if step_0 % UPDATE_STEPS == 0:
+                sess.run(update_op_0)
+
+            if step_0 % 100 == 0:
+                # print(gradients)
+                graph_layer_1_vars = tf.get_collection(scope='layer1_{0}'.format(0), key=tf.GraphKeys.TRAINABLE_VARIABLES)
+                graph_layer_2_vars = tf.get_collection(scope='layer2_{0}'.format(0), key=tf.GraphKeys.TRAINABLE_VARIABLES)
+
+                graph_vars = graph_layer_1_vars + graph_layer_2_vars
+                print( "Done step %d" % step_0)
+                print("On iteration %d it reaches %f accuracy" % (step_0, sess.run(accuracy, feed_dict={x0: mnist.test.images,
+                                                    y0_: mnist.test.labels})))
+                print(sess.run(graph_vars))
+
+        if FLAGS.task_index == 2 or FLAGS.task_index == 3:
+            # batch_xs_1, batch_ys_1 = mnist.train.next_batch(FLAGS.batch_size)
+            # train_feed_1 = {x1: batch_xs_1, y1_: batch_ys_1}
+            #
+            # _, step_1, _ = sess.run([train_op_1, global_step_1, accumulate_op_1], feed_dict=train_feed_1)
+            #
+            # if step_1 % UPDATE_STEPS == 0:
+            #     sess.run(update_op_1)
+            pass
 
     # Ask for all the services to stop.
     sv.stop()
