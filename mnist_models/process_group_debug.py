@@ -127,14 +127,12 @@ def inference(x, ps_num, is_copy=False):
 
   if is_copy:
     with tf.variable_scope('copy_layer1_{0}'.format(ps_num)) as scope:
-        hid_w = tf.Variable(
-            tf.zeros([IMAGE_PIXELS * IMAGE_PIXELS, FLAGS.hidden_units]), name="hid_w")
+        hid_w = tf.Variable(tf.zeros([IMAGE_PIXELS * IMAGE_PIXELS, FLAGS.hidden_units]), name="hid_w")
         hid_b = tf.Variable(tf.zeros([FLAGS.hidden_units]), name="hid_b")
 
     # Variables of the softmax layer
     with tf.variable_scope('copy_layer2_{0}'.format(ps_num)) as scope:
-        sm_w = tf.Variable(
-            tf.zeros([FLAGS.hidden_units, 10]),name="sm_w")
+        sm_w = tf.Variable(tf.zeros([FLAGS.hidden_units, 10]),name="sm_w")
         sm_b = tf.Variable(tf.zeros([10]), name="sm_b")
 
         return [hid_w, hid_b, sm_w, sm_b]
@@ -205,7 +203,7 @@ def main(_):
     accumulate_op_0 = accumulate_gradient_to_var(ps_num=0, average_grads=average_grads_0)
     update_op_0 = update_var(0) # Shall run it each 5 steps
 
-  saver = tf.train.Saver()
+  # saver = tf.train.Saver()
   summary_op = tf.summary.merge_all()
   init_op = tf.initialize_all_variables()
 
@@ -219,11 +217,11 @@ def main(_):
                              logdir="/tmp/train_logs",
                              init_op=init_op,
                              summary_op=summary_op,
-                             saver=saver,
                              global_step=global_step_0,
                              save_model_secs=600)
 
     mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
+    # import pdb; pdb.set_trace()
 
     # The supervisor takes care of session initialization, restoring from
     # a checkpoint, and closing when done or an error occurs.
@@ -234,6 +232,7 @@ def main(_):
         # Run a training step asynchronously.
         # See `tf.train.SyncReplicasOptimizer` for additional details on how to
         # perform *synchronous* training.
+
 
         batch_xs, batch_ys = mnist.train.next_batch(FLAGS.batch_size)
         train_feed = {x0: batch_xs, y0_: batch_ys}
