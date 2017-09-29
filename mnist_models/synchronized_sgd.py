@@ -119,7 +119,9 @@ def main(_):
   # Train
   for i in range(10000):
     # print(i)
+    import pdb; pdb.set_trace()
     sess.run(train_step)
+
 
     if i % 100 == 0:
 
