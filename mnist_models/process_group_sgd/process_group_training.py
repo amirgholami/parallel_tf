@@ -176,7 +176,7 @@ def main(_):
                                 "worker":["localhost:22888", "localhost:22889"]})
   server = tf.train.Server(cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
 
-  tf.set_random_seed(1234) # Replicate results for init condition.
+  # tf.set_random_seed(1234) # Replicate results for init condition.
 
   gradients_1 = []
   gradients_2 = []
@@ -311,12 +311,10 @@ def main(_):
             _, step = sess.run([train_op_1, global_step_1], feed_dict=train_feed)
 
             if step % 100 == 0:
-
-                print( "Done step %d for task %d" % (step, FLAGS.task_index))
-                print("On iteration %d ps it reaches %f accuracy" % (step, sess.run(accuracy_0, feed_dict={x0: mnist.test.images,
+                print("On task %d On iteration %d ps it reaches %f accuracy" % (FLAGS.task_index, step, sess.run(accuracy_0, feed_dict={x0: mnist.test.images,
                                                     y0_: mnist.test.labels})))
 
-                print("On iteration %d guest it reaches %f accuracy" % (step, sess.run(accuracy_1, feed_dict={x1: mnist.test.images,
+                print("On task %d On iteration %d guest it reaches %f accuracy" % (FLAGS.task_index, step, sess.run(accuracy_1, feed_dict={x1: mnist.test.images,
                                                     y1_: mnist.test.labels})))
 
         if FLAGS.task_index == 1:
@@ -324,15 +322,14 @@ def main(_):
             train_feed = {x2: batch_xs, y2_: batch_ys}
 
             if step % 300 == 0:
-                print("Before")
-                print("On iteration %d ps it reaches %f accuracy" % (step, sess.run(accuracy_0, feed_dict={x0: mnist.test.images,
+                print("Before update, On task %d On iteration %d ps it reaches %f accuracy" % (FLAGS.task_index, step, sess.run(accuracy_0, feed_dict={x0: mnist.test.images,
                                                     y0_: mnist.test.labels})))
                 sess.run([update_op_2])
                 sess.run([zero_copy_op_2])
                 sess.run([fetch_ps_op_2])
-                print("After")
-                print("On iteration %d ps it reaches %f accuracy" % (step, sess.run(accuracy_0, feed_dict={x0: mnist.test.images,
+                print("After update, On task %d On iteration %d ps it reaches %f accuracy" % (FLAGS.task_index, step, sess.run(accuracy_0, feed_dict={x0: mnist.test.images,
                                                     y0_: mnist.test.labels})))
+
 
             sess.run(accumulate_op_2, feed_dict=train_feed)
             _, step = sess.run([train_op_2, global_step_2], feed_dict=train_feed)
