@@ -6,11 +6,6 @@ from tensorflow.examples.tutorials.mnist import input_data
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import variable_scope
 
-
-# Usage: python synchronized_sgd.py --worker_hosts=localhost:22223,localhost:22224 --job_name=ps --task_index=0 &
-#        python synchronized_sgd.py --worker_hosts=localhost:22223,localhost:22224 --job_name=worker --task_index=0
-#        python synchronized_sgd.py --worker_hosts=localhost:22223,localhost:22224 --job_name=worker --task_index=1
-
 # Flags for defining the tf.train.ClusterSpec
 tf.app.flags.DEFINE_string("worker_hosts", "",
                            "Comma-separated list of hostname:port pairs")
@@ -73,12 +68,16 @@ def main(_):
     loss = -tf.reduce_sum(y_ * tf.log(tf.clip_by_value(y, 1e-10, 1.0)))
     correct_prediction = tf.equal(tf.argmax(y_, 1), tf.argmax(y, 1))
     accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+
     opt = tf.train.AdagradOptimizer(0.01)
+    # Using synchronization. We can modify the source code to write our own
+    # optimizer, but this one is very convenient.
     opt = tf.train.SyncReplicasOptimizer(opt, replicas_to_aggregate=num_workers,
                            total_num_replicas=num_workers)
     train_op = opt.minimize(loss, global_step=global_step)
 
-    # Need to run these tokens to start.
+    # Need to run these tokens to start. Queues are used for synchronization.
+    # see tf.train.SyncReplicasOptimizer
     local_init_op = opt.local_step_init_op
     if is_chief:
       local_init_op = opt.chief_init_op
