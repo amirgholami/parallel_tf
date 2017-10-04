@@ -1,7 +1,7 @@
 import subprocess
 import multiprocessing as mp
 
-def process_group_model():
+def synchronized_model():
 
     def run_ps():
         subprocess.run(["python", "synchronized_sgd.py",
