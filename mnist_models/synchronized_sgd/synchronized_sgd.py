@@ -1,6 +1,10 @@
 import math
+import time
 import tensorflow as tf
 from tensorflow.examples.tutorials.mnist import input_data
+
+from tensorflow.python.framework import ops
+from tensorflow.python.ops import variable_scope
 
 
 # Usage: python synchronized_sgd.py --worker_hosts=localhost:22223,localhost:22224 --job_name=ps --task_index=0 &
@@ -23,70 +27,26 @@ tf.app.flags.DEFINE_integer("batch_size", 100, "Training batch size")
 FLAGS = tf.app.flags.FLAGS
 
 IMAGE_PIXELS = 28
-def average_gradients(tower_grads):
-  """Calculate the average gradient for each shared variable across all towers.
-  Note that this function provides a synchronization point across all towers.
-  Args:
-    tower_grads: List of lists of (gradient, variable) tuples. The outer list
-      is over individual gradients. The inner list is over the gradient
-      calculation for each tower.
-  Returns:
-     List of pairs of (gradient, variable) where the gradient has been averaged
-     across all towers.
-  """
-  average_grads = []
-
-  for grad_and_vars in zip(*tower_grads):
-    # Note that each grad_and_vars looks like the following:
-    #   ((grad0_gpu0, var0_gpu0), ... , (grad0_gpuN, var0_gpuN))
-    grads = []
-
-    for g, _ in grad_and_vars:
-      if g is not None:
-        # Add 0 dimension to the gradients to represent the tower.
-        expanded_g = tf.expand_dims(g, 0)
-
-        # Append on a 'tower' dimension which we will average over below.
-        grads.append(expanded_g)
-
-    # Average over the 'tower' dimension.
-    if grads != []:
-        grad = tf.concat(axis=0, values=grads)
-        grad = tf.reduce_mean(grad, 0)
-
-        # Keep in mind that the Variables are redundant because they are shared
-        # across towers. So .. we will just return the first tower's pointer to
-        # the Variable.
-        v = grad_and_vars[0][1]
-        grad_and_var = (grad, v)
-
-        average_grads.append(grad_and_var)
-  # print(average_grads)
-  return average_grads
-
 def inference(x, ps_num):
+  hid_w = tf.Variable(
+      tf.truncated_normal([IMAGE_PIXELS * IMAGE_PIXELS, FLAGS.hidden_units],
+                          stddev=1.0 / IMAGE_PIXELS), name="hid_w")
+  hid_b = tf.Variable(tf.zeros([FLAGS.hidden_units]), name="hid_b")
 
-    with tf.variable_scope('layer1_{0}'.format(ps_num)) as scope:
-      hid_w = tf.Variable(
-          tf.truncated_normal([IMAGE_PIXELS * IMAGE_PIXELS, FLAGS.hidden_units],
-                              stddev=1.0 / IMAGE_PIXELS), name="hid_w")
-      hid_b = tf.Variable(tf.zeros([FLAGS.hidden_units]), name="hid_b")
+# Variables of the softmax layer
 
-    # Variables of the softmax layer
-    with tf.variable_scope('layer2_{0}'.format(ps_num)) as scope:
-      sm_w = tf.Variable(
-          tf.truncated_normal([FLAGS.hidden_units, 10],
-                              stddev=1.0 / math.sqrt(FLAGS.hidden_units)),
-          name="sm_w")
-      sm_b = tf.Variable(tf.zeros([10]), name="sm_b")
+  sm_w = tf.Variable(
+      tf.truncated_normal([FLAGS.hidden_units, 10],
+                          stddev=1.0 / math.sqrt(FLAGS.hidden_units)),
+      name="sm_w")
+  sm_b = tf.Variable(tf.zeros([10]), name="sm_b")
 
-    with tf.variable_scope('softmax_{0}'.format(ps_num)) as scope:
-      hid_lin = tf.nn.xw_plus_b(x, hid_w, hid_b)
-      hid = tf.nn.relu(hid_lin)
+  hid_lin = tf.nn.xw_plus_b(x, hid_w, hid_b)
+  hid = tf.nn.relu(hid_lin)
 
-      y = tf.nn.softmax(tf.nn.xw_plus_b(hid, sm_w, sm_b))
+  y = tf.nn.softmax(tf.nn.xw_plus_b(hid, sm_w, sm_b))
 
-    return y
+  return y
 
 def main(_):
   # Create cluster:
@@ -94,83 +54,87 @@ def main(_):
   cluster = tf.train.ClusterSpec({"ps": ["localhost:22222"],
                                 "worker": worker_hosts})
   server = tf.train.Server(cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
-  gradients = []
-
-  # PS0 is the central ps holding vars.
-  with tf.device("/job:ps/task:0"):
-
-      y_ = tf.placeholder(tf.float32, [None, 10])
-      x = tf.placeholder(tf.float32, [None, IMAGE_PIXELS * IMAGE_PIXELS])
-      y = inference(x, 0)
-      global_step = tf.Variable(0)
-
-      correct_prediction = tf.equal(tf.argmax(y_, 1), tf.argmax(y, 1))
-      accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-
-  # Build the graph for two different worker, using the same params.
-  for i in range(2):
-      with tf.device(tf.train.replica_device_setter(
-          worker_device="/job:worker/task:%d" % i,
-          cluster=cluster)):
-
-        loss = -tf.reduce_sum(y_ * tf.log(tf.clip_by_value(y, 1e-10, 1.0)))
-        opt = tf.train.AdagradOptimizer(0.01)
-        grad = opt.compute_gradients(loss)
-        gradients.append(grad)
-
-  # Define ops on ps:
-  with tf.device("/job:ps/task:0"):
-    # Synchronize the grads
-    average_grads = average_gradients(gradients)
-
-    # Apply the gradients to adjust the shared variables.
-    train_op = opt.apply_gradients(average_grads, global_step=global_step)
-
-  saver = tf.train.Saver()
-
-  summary_op = tf.summary.merge_all()
-  init_op = tf.initialize_all_variables()
-
   if FLAGS.job_name == "ps":
     server.join()
-  elif FLAGS.job_name == "worker":
 
+  num_workers = len(worker_hosts)
+
+  is_chief = (FLAGS.task_index == 0)
+  worker_device = "/job:worker/task:%d/cpu:0" % FLAGS.task_index
+
+  with tf.device(tf.train.replica_device_setter(
+    worker_device=worker_device,
+    ps_device="/job:ps/cpu:0",
+    cluster=cluster)):
+    global_step = tf.Variable(0, name="global_step", trainable=False)
+    y_ = tf.placeholder(tf.float32, [None, 10])
+    x = tf.placeholder(tf.float32, [None, IMAGE_PIXELS * IMAGE_PIXELS])
+    y = inference(x, FLAGS.task_index)
+    loss = -tf.reduce_sum(y_ * tf.log(tf.clip_by_value(y, 1e-10, 1.0)))
+    correct_prediction = tf.equal(tf.argmax(y_, 1), tf.argmax(y, 1))
+    accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+    opt = tf.train.AdagradOptimizer(0.01)
+    opt = tf.train.SyncReplicasOptimizer(opt, replicas_to_aggregate=num_workers,
+                           total_num_replicas=num_workers)
+    train_op = opt.minimize(loss, global_step=global_step)
+
+    # Need to run these tokens to start.
+    local_init_op = opt.local_step_init_op
+    if is_chief:
+      local_init_op = opt.chief_init_op
+    ready_for_local_init_op = opt.ready_for_local_init_op
+    # Initial token and chief queue runners required by the sync_replicas mode
+    chief_queue_runner = opt.get_chief_queue_runner()
+    sync_init_op = opt.get_init_tokens_op()
+
+    saver = tf.train.Saver()
+
+    summary_op = tf.summary.merge_all()
+    init_op = tf.global_variables_initializer()
 
     # Assigns ops to the local worker by default.
     # Create a "supervisor", which oversees the training process.
-    sv = tf.train.Supervisor(is_chief=(FLAGS.task_index == 0),
+    sv = tf.train.Supervisor(is_chief=is_chief,
                              logdir="/tmp/train_logs",
                              init_op=init_op,
+                             local_init_op=local_init_op,
+                             ready_for_local_init_op=ready_for_local_init_op,
+                             global_step=global_step,
                              summary_op=summary_op,
                              save_model_secs=600)
 
     mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
 
-    # The supervisor takes care of session initialization, restoring from
-    # a checkpoint, and closing when done or an error occurs.
-    with sv.managed_session(server.target) as sess:
+    sess_config = tf.ConfigProto(
+      allow_soft_placement=True,
+      log_device_placement=False,
+      device_filters=["/job:ps", "/job:worker/task:0", "/job:worker/task:1"])
+    sess = sv.prepare_or_wait_for_session(server.target, config=sess_config)
+    if is_chief:
+      # Chief worker will start the chief queue runner and call the init op.
+      sess.run(sync_init_op)
+      sv.start_queue_runners(sess, [chief_queue_runner])
+      # train_writer = tf.summary.FileWriter('/tmp/train_logs_summary', sess.graph)
 
-      train_writer = tf.summary.FileWriter('/tmp/train_logs_summary', sess.graph)
+    # Perform training.
+    local_step = 0
+    step = 0
+    while not sv.should_stop() and step < 1000000:
+      batch_xs, batch_ys = mnist.train.next_batch(FLAGS.batch_size)
 
-      # Loop until the supervisor shuts down or 1000000 steps have completed.
-      step = 0
-      total_sum_w = 0
-      while not sv.should_stop() and step < 1000000:
-        # print(step)
-        # Run a training step asynchronously.
-        # See `tf.train.SyncReplicasOptimizer` for additional details on how to
-        # perform *synchronous* training.
-        batch_xs, batch_ys = mnist.train.next_batch(FLAGS.batch_size)
+      train_feed = {x: batch_xs, y_: batch_ys}
+      _, step = sess.run([train_op, global_step], feed_dict=train_feed)
+      local_step += 1
+      now = time.time()
 
-        train_feed = {x: batch_xs, y_: batch_ys}
-        _, step = sess.run([train_op, global_step], feed_dict=train_feed)
+      if step % 200 == 0:
+        print("%f: Worker %d: training step %d done (global step: %d)" %
+          (now, FLAGS.task_index, local_step, step))
+        print("On trainer %d, iteration %d ps it reaches %f accuracy" % (FLAGS.task_index, step, sess.run(accuracy, feed_dict={x: mnist.test.images,
+                                              y_: mnist.test.labels})))
 
-        if step % 200 == 0:
-            print("On trainer %d, iteration %d ps it reaches %f accuracy" % (FLAGS.task_index, step, sess.run(accuracy, feed_dict={x: mnist.test.images,
-                                                y_: mnist.test.labels})))
-
-    # Ask for all the services to stop.
-    sv.stop()
+  # Ask for all the services to stop.
+  sv.stop()
 
 if __name__ == "__main__":
   tf.app.run()
