@@ -12,7 +12,7 @@ def process_group():
     worker_processes = []
     for i in range(3):
         ps_processes.append(mp.Process(target=run_ps, args=(i, )))
-    for i in range(2):
+    for i in range(4):
         worker_processes.append(mp.Process(target=run_worker, args=(i, )))
 
     for p in ps_processes + worker_processes:

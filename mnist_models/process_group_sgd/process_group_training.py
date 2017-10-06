@@ -173,7 +173,7 @@ def inference(x, ps_num, is_copy=False):
 def main(_):
   # Create cluster:
   cluster = tf.train.ClusterSpec({"ps": ["localhost:22222", "localhost:22223", "localhost:22224"],
-                                "worker":["localhost:22888", "localhost:22889"]})
+                                "worker":["localhost:22888", "localhost:22889", "localhost:22890", "localhost:22891"]})
   server = tf.train.Server(cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
 
   # tf.set_random_seed(1234) # Replicate results for init condition.
@@ -214,7 +214,7 @@ def main(_):
       accumulated_vars_2 = inference(None, 2, is_copy=True)
 
   # Build the graph for two different worker, using the same params.
-  for i in range(1):
+  for i in range(2):
       with tf.device(tf.train.replica_device_setter(
           worker_device="/job:worker/task:%d" % i,
           cluster=cluster)):
@@ -229,7 +229,7 @@ def main(_):
         grad = opt_1.compute_gradients(loss)
         gradients_1.append(grad)
 
-  for i in range(1, 2):
+  for i in range(2, 4):
       with tf.device(tf.train.replica_device_setter(
           worker_device="/job:worker/task:%d" % i,
           cluster=cluster)):
@@ -284,7 +284,7 @@ def main(_):
                              save_model_secs=600)
 
     mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
-
+    print(FLAGS.task_index)
     # The supervisor takes care of session initialization, restoring from
     # a checkpoint, and closing when done or an error occurs.
     with sv.managed_session(server.target) as sess:
@@ -293,12 +293,13 @@ def main(_):
       # Loop until the supervisor shuts down or 1000000 steps have completed.
       step = 0
       total_sum_w = 0
+
       while not sv.should_stop() and step < 1000000:
         # Run a training step asynchronously.
         # See `tf.train.SyncReplicasOptimizer` for additional details on how to
         # perform *synchronous* training.
         batch_xs, batch_ys = mnist.train.next_batch(FLAGS.batch_size)
-        if FLAGS.task_index == 0:
+        if FLAGS.task_index % 2 == 0:
 
             train_feed = {x1: batch_xs, y1_: batch_ys}
 
@@ -317,7 +318,7 @@ def main(_):
                 print("On task %d On iteration %d guest it reaches %f accuracy" % (FLAGS.task_index, step, sess.run(accuracy_1, feed_dict={x1: mnist.test.images,
                                                     y1_: mnist.test.labels})))
 
-        if FLAGS.task_index == 1:
+        if FLAGS.task_index % 2 == 1:
             # pass
             train_feed = {x2: batch_xs, y2_: batch_ys}
 
