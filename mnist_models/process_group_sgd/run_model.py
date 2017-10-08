@@ -4,9 +4,9 @@ import multiprocessing as mp
 def process_group():
 
     def run_ps(ps_num):
-        subprocess.run(["python", "process_group_training.py", "--job_name=ps", "--task_index={0}".format(ps_num)])
+        subprocess.run(["python", "process_group_with_syncreplica.py", "--job_name=ps", "--task_index={0}".format(ps_num)])
     def run_worker(worker_num):
-        subprocess.run(["python", "process_group_training.py", "--job_name=worker", "--task_index={0}".format(worker_num)])
+        subprocess.run(["python", "process_group_with_syncreplica.py", "--job_name=worker", "--task_index={0}".format(worker_num)])
 
     ps_processes = []
     worker_processes = []

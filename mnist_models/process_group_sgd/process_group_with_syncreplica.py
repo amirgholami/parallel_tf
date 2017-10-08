@@ -1,5 +1,6 @@
 import math
 import tensorflow as tf
+import os
 from tensorflow.examples.tutorials.mnist import input_data
 
 # Flags for defining the tf.train.ClusterSpec
@@ -31,7 +32,6 @@ def accumulate_gradient_to_var(ps_id, average_grads, opt):
     average_grads = [tup for tup in average_grads if tup[0] is not None]
     # update_target_fn will be called everytime when new averaged_grads arrives at the ps.
     update_target_fn = []
-    print(copied_local_vars)
     for tup in zip(average_grads, copied_local_vars):
         grad, _ = tup[0]
         copy_target = tup[1]
@@ -104,6 +104,14 @@ def main(_):
   # Create cluster:
   # worker_hosts = FLAGS.worker_hosts.split(",")
   # server_hosts = FLAGS.server_hosts.split(",")
+  train_log_path = os.path.join(os.getcwd(), 'train_logs')
+  print(train_log_path)
+
+  if FLAGS.task_index == 0 and FLAGS.job_name == "ps":
+    import shutil
+    if os.path.isdir(train_log_path):
+      shutil.rmtree(train_log_path)
+
   worker_hosts = ["localhost:22226", "localhost:22225", "localhost:22227", "localhost:22228"]
   server_hosts = ["localhost:22222", "localhost:22223", "localhost:22224"]
   cluster = tf.train.ClusterSpec({"ps": server_hosts,
@@ -114,22 +122,22 @@ def main(_):
   # Use the last server as central ps.
   server_num = ps_server_id = len(server_hosts) - 1
 
-  # Get ps id for this worker.
+  # Get ps id for this worker. (0,2) (1,3)
   ps_task_id = get_ps_task_id(FLAGS.task_index, server_num)
 
   group_size = worker_num // server_num
   is_group_chief = (FLAGS.task_index < group_size)
-  is_chief = (FLAGS.task_index == 1)
+  is_chief = (FLAGS.task_index == 0)
 
   # Build central ps
-  with tf.device("job:ps/task:%d" % ps_server_id):
+  with tf.device("/job:ps/task:%d" % ps_server_id):
     ps_x = tf.placeholder(tf.float32, [None, IMAGE_PIXELS * IMAGE_PIXELS])
     ps_y_ = tf.placeholder(tf.float32, [None, 10])
     ps_y = inference(ps_x, ps_server_id)
     correct_prediction = tf.equal(tf.argmax(ps_y_, 1), tf.argmax(ps_y, 1))
     ps_accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
-  with tf.device("job:ps/task:0"):
+  with tf.device("/job:ps/task:0"):
     x = tf.placeholder(tf.float32, [None, IMAGE_PIXELS * IMAGE_PIXELS])
     y_ = tf.placeholder(tf.float32, [None, 10])
     y = inference(x, 0)
@@ -153,23 +161,23 @@ def main(_):
                            total_num_replicas=group_num_replicas)
     # train_op = opt.minimize(loss, global_step=global_step)
     grad = sync_opt.compute_gradients(loss)
-    print(grad, FLAGS.task_index)
-    train_op = sync_opt.apply_gradients(grad, global_step=global_step)
+    
+    if ps_task_id == 0:
+      train_op = sync_opt.apply_gradients(grad, global_step=global_step)
+      
+      local_init_op = sync_opt.local_step_init_op
+      if is_group_chief:
+        local_init_op = sync_opt.chief_init_op
+      ready_for_local_init_op = sync_opt.ready_for_local_init_op
+      chief_queue_runner = sync_opt.get_chief_queue_runner()
+      sync_init_op = sync_opt.get_init_tokens_op()
 
     # This step only carry out by the chief, after grad being computed.
-    # if is_group_chief:
     accumulate_op = accumulate_gradient_to_var(0, grad, opt)
     update_op, zero_copy_op, fetch_ps_op = update_var(ps_task_id, ps_server_id)
 
-    local_init_op = sync_opt.local_step_init_op
-    if is_chief:
-      local_init_op = sync_opt.chief_init_op
-    ready_for_local_init_op = sync_opt.ready_for_local_init_op
-    chief_queue_runner = sync_opt.get_chief_queue_runner()
-    sync_init_op = sync_opt.get_init_tokens_op()
 
-
-  with tf.device("job:ps/task:1"):
+  with tf.device("/job:ps/task:1"):
     x1 = tf.placeholder(tf.float32, [None, IMAGE_PIXELS * IMAGE_PIXELS])
     y1_ = tf.placeholder(tf.float32, [None, 10])
     y1 = inference(x1, 1)
@@ -192,27 +200,26 @@ def main(_):
     sync_opt_1 = tf.train.SyncReplicasOptimizer(opt_1, replicas_to_aggregate=group_num_replicas,
                            total_num_replicas=group_num_replicas)
     # train_op = opt.minimize(loss, global_step=global_step)
-    grad_1 = sync_opt.compute_gradients(loss_1)
-    print(grad, FLAGS.task_index)
-    train_op_1 = sync_opt.apply_gradients(grad_1, global_step=global_step_1)
+    grad_1 = sync_opt_1.compute_gradients(loss_1)
 
-    # This step only carry out by the chief, after grad being computed.
-    # if is_group_chief:
+    # Separate those local variable initialization from the global ones.
+    if ps_task_id == 1:
+      train_op_1 = sync_opt_1.apply_gradients(grad_1, global_step=global_step_1)
+      
+      local_init_op_1 = sync_opt_1.local_step_init_op
+      if is_group_chief:
+        local_init_op_1 = sync_opt_1.chief_init_op
+      ready_for_local_init_op_1 = sync_opt_1.ready_for_local_init_op
+      chief_queue_runner_1 = sync_opt_1.get_chief_queue_runner()
+      sync_init_op_1 = sync_opt_1.get_init_tokens_op()
+
     accumulate_op_1 = accumulate_gradient_to_var(1, grad_1, opt_1)
     update_op_1, zero_copy_op_1, fetch_ps_op_1 = update_var(ps_task_id, ps_server_id)
-
-    local_init_op_1 = sync_opt.local_step_init_op
-    if is_chief:
-      local_init_op_1 = sync_opt.chief_init_op
-    ready_for_local_init_op_1 = sync_opt.ready_for_local_init_op
-    chief_queue_runner_1 = sync_opt.get_chief_queue_runner()
-    sync_init_op_1 = sync_opt.get_init_tokens_op()
-  
+ 
   if FLAGS.job_name == "ps":
     server.join()
 
   ###### Build the graph for different worker groups, using the same params. #####
-  # print(ps_task_id)
   with tf.device(tf.train.replica_device_setter(
       worker_device="/job:worker/task:%d" % FLAGS.task_index,
       ps_device="/job:ps/task:%d" % ps_task_id,
@@ -223,33 +230,33 @@ def main(_):
       y = y1
       y_ = y1_
       global_step = global_step_1
-    #   loss = loss_1
-    #   correct_prediction = correct_prediction_1
-    #   accuracy = accuracy_1
-    #   opt = opt_1
-    #   sync_opt = sync_opt_1
-    #   grad = grad_1
-    #   train_op = train_op_1
+      loss = loss_1
+      correct_prediction = correct_prediction_1
+      accuracy = accuracy_1
+      opt = opt_1
+      sync_opt = sync_opt_1
+      grad = grad_1
+      train_op = train_op_1
       accumulate_op = accumulate_op_1
       update_op = update_op_1
       zero_copy_op = zero_copy_op_1
       fetch_ps_op = fetch_ps_op_1
-    #   local_init_op = local_init_op_1
-    #   ready_for_local_init_op = ready_for_local_init_op_1
-    #   chief_queue_runner = chief_queue_runner_1
-    #   sync_init_op = sync_init_op_1
+      local_init_op = local_init_op_1
+      ready_for_local_init_op = ready_for_local_init_op_1
+      chief_queue_runner = chief_queue_runner_1
+      sync_init_op = sync_init_op_1
 
     saver = tf.train.Saver()
 
     summary_op = tf.summary.merge_all()
-    init_op = tf.initialize_all_variables()
-    if FLAGS.task_index == 0:
-      print(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES))
+    init_op = tf.global_variables_initializer()
+
+    report = tf.report_uninitialized_variables()
 
   # Assigns ops to the local worker by default.
   # Create a "supervisor", which oversees the training process.
-    sv = tf.train.Supervisor(is_chief=is_chief,
-                             logdir="/tmp/train_logs",
+    sv = tf.train.Supervisor(is_chief=is_group_chief,
+                             logdir=train_log_path,
                              local_init_op=local_init_op,
                              ready_for_local_init_op=ready_for_local_init_op,
                              global_step=global_step,
@@ -257,48 +264,42 @@ def main(_):
                              summary_op=summary_op,
                              save_model_secs=600)
 
-    print(sv, FLAGS.task_index)
-
     mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
 
     ps_specs = ["/job:ps/task:{0}".format(i) for i in range(len(server_hosts))]
     worker_specs = ["/job:worker/task:{0}".format(i) for i in range(worker_num)]
 
     specs = (ps_specs + worker_specs)
-    # print(specs)
 
     sess_config = tf.ConfigProto(
       allow_soft_placement=True,
       log_device_placement=False,
       device_filters=specs)
 
-  # The supervisor takes care of session initialization, restoring from
-  # a checkpoint, and closing when done or an error occurs.
-    print(FLAGS.task_index)
-    if FLAGS.task_index <= 1:
-      import pdb; pdb.set_trace()
+    # The supervisor takes care of session initialization, restoring from
+    # a checkpoint, and closing when done or an error occurs.
     sess = sv.prepare_or_wait_for_session(server.target, config=sess_config)
-
-    if is_chief:
+    
+    if is_group_chief:
       sess.run(sync_init_op)
       sv.start_queue_runners(sess, [chief_queue_runner])
 
     # Loop until the supervisor shuts down or 1000000 steps have completed.
     step = 0
     local_step = 0
-    # print(FLAGS.task_index)
-    while not sv.should_stop() and step < 1000000:
+    
+    while not sv.should_stop():
       batch_xs, batch_ys = mnist.train.next_batch(FLAGS.batch_size // worker_num)
       train_feed = {x: batch_xs, y_: batch_ys}
+
       _, step = sess.run([train_op, global_step], feed_dict=train_feed)
 
       local_step += 1
 
-      if is_group_chief:
-        sess.run([accumulate_op], feed_dict=train_feed)
-        sess.run([update_op])
-        sess.run([zero_copy_op])
-        sess.run([fetch_ps_op])
+      sess.run([accumulate_op], feed_dict=train_feed)
+      sess.run([update_op])
+      sess.run([zero_copy_op])
+      sess.run([fetch_ps_op])
 
       if step % 100 == 0:
           print("Worker %d: training step %d done (global step: %d)" %
