@@ -1,2 +1,0 @@
-model_checkpoint_path: "/Users/yuconghe/Berkeley/FA17/parallel_tf/mnist_models/process_group_sgd/train_logs/model.ckpt-0"
-all_model_checkpoint_paths: "/Users/yuconghe/Berkeley/FA17/parallel_tf/mnist_models/process_group_sgd/train_logs/model.ckpt-0"

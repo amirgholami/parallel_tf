@@ -1,6 +1,8 @@
 import math
 import tensorflow as tf 
 import os
+import numpy as np
+from multiprocessing import Process, Lock
 from tensorflow.examples.tutorials.mnist import input_data
 
 tf.app.flags.DEFINE_string("ps_hosts", "",
@@ -21,7 +23,22 @@ FLAGS = tf.app.flags.FLAGS
 
 IMAGE_PIXELS = 28
 
-def accumulate_gradient_to_var(ps_id, average_grads, opt):
+seeds = [1,2,3,4,5,6]
+
+def apply_gradient_to_ps(ps_server_id, average_grads, opt):
+    server_vars = tf.get_collection(scope='ps_{0}'.format(ps_server_id),key=tf.GraphKeys.TRAINABLE_VARIABLES)
+    average_grads = [tup for tup in average_grads if tup[0] is not None]
+    # update_target_fn will be called everytime when new averaged_grads arrives at the ps.
+    update_target_fn = []
+    for tup in zip(average_grads, server_vars):
+        grad, _ = tup[0]
+        var = tup[1]
+        grad_and_var = (grad, var)
+        update_target_fn.append(grad_and_var)
+    return opt.apply_gradients(update_target_fn)
+
+
+def accumulate_gradient_to_var(ps_id, average_grads, opt, global_step):
     """
     Create a assign_op for given ps.
     Assign gradients to the copy on each ps in order to accumulate gradients.
@@ -36,7 +53,8 @@ def accumulate_gradient_to_var(ps_id, average_grads, opt):
         copy_target = tup[1]
         grad_and_var = (grad, copy_target)
         update_target_fn.append(grad_and_var)
-    return opt.apply_gradients(update_target_fn)
+    return opt.apply_gradients(update_target_fn, global_step=global_step)
+
 
 def update_var(ps_id, ps_num):
     copied_local_vars = tf.get_collection(scope="copy_ps_{0}".format(ps_id), key=tf.GraphKeys.TRAINABLE_VARIABLES)
@@ -45,18 +63,19 @@ def update_var(ps_id, ps_num):
     # Update first.
     update_target_fn = []
     for grad, target in zip(copied_local_vars, ps_vars):
-        update_target_fn.append(tf.assign_add(target, grad))
+        update_target_fn.append(tf.assign_add(target, grad, use_locking=True))
     # Zero out then
     zero_copy_fn = []
     for var in copied_local_vars:
         zero_copy_fn.append(tf.assign(
             var,
-            tf.zeros(shape=var.shape)
+            tf.zeros(shape=var.shape),
+            use_locking=True
         ))
     # Fetch variable thirdly.
     fetch_ps_fn = []
     for target, source in zip(local_vars, ps_vars):
-        fetch_ps_fn.append(tf.assign(target, source))
+        fetch_ps_fn.append(tf.assign(target, source, use_locking=True))
     # Group into functions
     update_target_fn = tf.group(*update_target_fn)
     zero_copy_fn = tf.group(*zero_copy_fn)
@@ -135,7 +154,14 @@ def get_ps_task_id(worker_id, server_num):
   # Round robin.
   return worker_id % server_num
 
-def main(_):
+def run_model(lock, job_name, task_index):
+
+  FLAGS.job_name = job_name
+  FLAGS.task_index = task_index
+
+  # Fix seed.
+  tf.set_random_seed(seeds[FLAGS.task_index])
+  np.random.seed(seeds[FLAGS.task_index])
 
   ####### Create cluster ########
   train_log_path = os.path.join(os.getcwd(), 'train_logs')
@@ -162,6 +188,8 @@ def main(_):
   is_group_chief = (FLAGS.task_index < server_num)
   is_chief = (FLAGS.task_index == 0)
 
+  # print(ps_id, group_size, FLAGS.task_index, is_group_chief)
+
   # Build central ps.
   with tf.device("/job:ps/task:%d" % ps_server_id):
     ps_x = tf.placeholder(tf.float32, shape=[None, IMAGE_PIXELS * IMAGE_PIXELS])
@@ -185,15 +213,16 @@ def main(_):
         tf.nn.softmax_cross_entropy_with_logits(labels=y_, logits=y))
     correct_prediction = tf.equal(tf.argmax(y, 1), tf.argmax(y_, 1))
     accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-    opt = tf.train.AdamOptimizer(1e-4)
+    opt = tf.train.AdamOptimizer(1e-4, use_locking=True)
     group_num_replicas = worker_num // server_num
 
     # Assign extra workers if not divisible.
+    print(group_num_replicas)
     if FLAGS.task_index > group_num_replicas * server_num:
       group_num_replicas += 1
 
     sync_opt = tf.train.SyncReplicasOptimizer(opt, replicas_to_aggregate=group_num_replicas,
-                       total_num_replicas=group_num_replicas)
+                       total_num_replicas=group_num_replicas, use_locking=True)
     grad = sync_opt.compute_gradients(loss)
     train_op = sync_opt.apply_gradients(grad, global_step=global_step)
 
@@ -205,8 +234,9 @@ def main(_):
     sync_init_op = sync_opt.get_init_tokens_op()
 
     # This step only carry out by the chief, after grad being computed.
-    accumulate_op = accumulate_gradient_to_var(ps_id, grad, opt)
+    # accumulate_op = accumulate_gradient_to_var(ps_id, grad, opt, None)
     update_op, zero_copy_op, fetch_ps_op = update_var(ps_id, ps_server_id)
+    assign_to_ps_op = apply_gradient_to_ps(ps_server_id, grad, opt)
 
     report = tf.report_uninitialized_variables()
 
@@ -251,32 +281,54 @@ def main(_):
     step = 0
     local_step = 0
     step_and_accuracy = []
-    print(sess.run(report))
 
     while not sv.should_stop():
       batch_xs, batch_ys = mnist.train.next_batch(FLAGS.batch_size // worker_num)
-      train_feed = {x: batch_xs, y_: batch_ys, keep_prob:0.6}
+      train_feed = {x: batch_xs, y_: batch_ys, keep_prob:0.5}
 
       _, step = sess.run([train_op, global_step], feed_dict=train_feed)
 
       local_step += 1
 
       if is_group_chief:
-        sess.run([accumulate_op], feed_dict=train_feed)
-        sess.run([update_op])
-        sess.run([zero_copy_op])
+        # Update shall be atomic. 
+        lock.acquire()
+        sess.run(assign_to_ps_op, feed_dict=train_feed)
         sess.run([fetch_ps_op])
+        lock.release()
+        
 
       if step % 5 == 0:
         print("Worker %d: training step %d done (global step: %d)" % (FLAGS.task_index, local_step, step))
+        train_accuracy = sess.run(ps_accuracy, feed_dict={ps_x: batch_xs,
+                                            ps_y_: batch_ys, ps_keep_prob:1.0})
+        print("On task %d On iteration %d ps it reaches %f accuracy" % (FLAGS.task_index, step, train_accuracy))
         
-      if step % 100 == 0:
+        
+      if step % 100 == 0 and step != 0:
+        lock.acquire()
+        # While computing, shall be locked.
         test_accuracy = sess.run(ps_accuracy, feed_dict={ps_x: mnist.test.images,
                                             ps_y_: mnist.test.labels, ps_keep_prob:1.0})
+        lock.release()
         print("On task %d On iteration %d ps it reaches %f accuracy" % (FLAGS.task_index, step, test_accuracy))
         step_and_accuracy.append((step, test_accuracy))
       if step % 2000 == 0 and is_chief:
         print(step_and_accuracy)
 
+def main():
+
+  lock = Lock()
+  lock = Lock()
+  Process(target=run_model, args=(lock, "ps", 0, )).start()
+  Process(target=run_model, args=(lock, "ps", 1, )).start()
+  Process(target=run_model, args=(lock, "ps", 2, )).start()
+
+  Process(target=run_model, args=(lock, "worker", 0, )).start()
+  Process(target=run_model, args=(lock, "worker", 1, )).start()
+  Process(target=run_model, args=(lock, "worker", 2, )).start()
+  Process(target=run_model, args=(lock, "worker", 3, )).start()
+
+
 if __name__ == "__main__":
-  tf.app.run()
+  main()
