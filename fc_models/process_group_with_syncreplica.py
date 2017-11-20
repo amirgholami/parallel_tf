@@ -83,7 +83,7 @@ def run_model(job_name, task_index, barrier, lock):
     if os.path.isdir(train_log_path):
       shutil.rmtree(train_log_path)
 
-  worker_hosts = ["localhost:28427", "localhost:28428", "localhost:27427", "localhost:27428"]
+  worker_hosts = ["localhost:28427", "localhost:28428"]
   server_hosts = ["localhost:28422", "localhost:28423", "localhost:28334"]
   cluster = tf.train.ClusterSpec({"ps": server_hosts,
                                 "worker": worker_hosts})
@@ -101,15 +101,15 @@ def run_model(job_name, task_index, barrier, lock):
   is_chief = (task_index == 0)
 
   # Build central ps
-  with tf.device("/job:ps/task:%d" % ps_server_id):
+  with tf.device("/job:ps/task:%d/cpu:0" % ps_server_id):
     ps_x = tf.placeholder(tf.float32, [None, IMAGE_PIXELS * IMAGE_PIXELS])
     ps_y_ = tf.placeholder(tf.float32, [None, 10])
     ps_y = inference(ps_x, ps_server_id)
     correct_prediction = tf.equal(tf.argmax(ps_y_, 1), tf.argmax(ps_y, 1))
     ps_accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
-
-  with tf.device("/job:ps/task:%d" % ps_task_id):
+  gpu_idx = ps_task_id
+  with tf.device("/job:ps/task:%d/cpu:0" % (ps_task_id, gpu_idx)):
     x = tf.placeholder(tf.float32, [None, IMAGE_PIXELS * IMAGE_PIXELS])
     y_ = tf.placeholder(tf.float32, [None, 10])
     y = inference(x, ps_task_id)
@@ -156,8 +156,8 @@ def run_model(job_name, task_index, barrier, lock):
 
   ###### Build the graph for different worker groups, using the same params. #####
   with tf.device(tf.train.replica_device_setter(
-      worker_device="/job:worker/task:%d" % task_index,
-      ps_device="/job:ps/task:%d" % ps_task_id,
+      worker_device="/job:worker/task:%d/gpu:%d" % (task_index, gpu_idx),
+      ps_device="/job:ps/task:%d/cpu:0" % ps_task_id,
       cluster=cluster)):
 
     saver = tf.train.Saver()
@@ -255,14 +255,14 @@ def main(_):
   random.seed(0)
 
   threads = []
-  b1 = threading.Barrier(parties=2)
-  b2 = threading.Barrier(parties=2)
+  b1 = threading.Barrier(parties=1)
+  b2 = threading.Barrier(parties=1)
   l = threading.Lock()
-  for i in [0, 2]:
+  for i in [0]:
       threads.append(threading.Thread(target=run_model, args=("worker", i, b1, l, )))
   threads.append(threading.Thread(target=run_model, args=("ps", 1, None, None, )))
 
-  for i in [1, 3]:
+  for i in [1]:
       threads.append(threading.Thread(target=run_model, args=("worker", i, b2, l, )))
   threads.append(threading.Thread(target=run_model, args=("ps", 2, None, None, )))
 
