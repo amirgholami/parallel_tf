@@ -154,7 +154,7 @@ def run_model(job_name, task_index):
                                               y_: mnist.test.labels})
         print("%f: Worker %d: training step %d done (global step: %d)" %
           (now, task_index, local_step, step))
-        print("On trainer %d, iteration %d ps it reaches %f accuracy" % (task_index, step, test_accuracy))
+        print("On trainer %d, global_step %d ps it reaches %f accuracy" % (task_index, step, test_accuracy))
         # step_and_accuracy.append((step, test_accuracy))
       # if step % 20000 == 0:
         # print(step_and_accuracy)

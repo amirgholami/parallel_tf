@@ -94,7 +94,7 @@ def tower_loss(scope, images, labels, num_gpus, batch_size=128):
     loss_name = re.sub('%s_[0-9]*/' % cifar10.TOWER_NAME, '', l.op.name)
     tf.summary.scalar(loss_name, l)
 
-  return total_loss
+  return total_loss, logits
 
 
 def average_gradients(tower_grads):
@@ -132,6 +132,41 @@ def average_gradients(tower_grads):
     average_grads.append(grad_and_var)
   return average_grads
 
+def create_standard_tensors(images, distorted=False):
+  print("Spawning 10 threads to resize images... make take some time.")
+  import threading
+  WORKER_COUNT = 1
+  ret = [[] for i in range(WORKER_COUNT)]
+  threads = []
+
+
+  def worker_func(imgs, lst, thread_idx, distorted=False):
+    height = IMAGE_SIZE
+    width = IMAGE_SIZE
+    for i in range(len(imgs)):
+      img = imgs[i]
+      if i % 10 == 0:
+        print("Thread_idx: %d done %3f" % (thread_idx, i / len(imgs)))
+      if distorted:
+        pass
+      else:
+        resized_image = tf.image.resize_image_with_crop_or_pad(img, height, width)
+        float_image = tf.image.per_image_standardization(img)
+        lst.append(float_image)
+    return
+
+
+  for i in range(WORKER_COUNT):
+    mini_batch_size = len(images) // WORKER_COUNT
+    batch_images = images[mini_batch_size * i: mini_batch_size * (i+1)]
+    t = threading.Thread(target=worker_func, args=(batch_images, ret[i], i, ))
+    threads.append(t)
+    t.start()
+
+  for t in threads:
+    t.join()
+    
+  return ret
 
 def train(num_gpus=1, batch_size=128):
   """Train CIFAR-10 for a number of steps."""
@@ -145,7 +180,8 @@ def train(num_gpus=1, batch_size=128):
       placeholders[img_key] = tf.placeholder(tf.float32, shape=[batch_size // num_gpus, 32, 32, 3], name=img_key)
       label_key = 'label_%d' % i
       ### Probably Error ###
-      placeholders[label_key] = tf.placeholder(tf.float32, shape=[batch_size // num_gpus], name=label_key)
+      placeholders[label_key] = tf.placeholder(tf.int32, shape=[batch_size // num_gpus], name=label_key)
+    logits = {}
 
     def get_placeholder(name):
       return placeholders[name]
@@ -173,8 +209,17 @@ def train(num_gpus=1, batch_size=128):
     result = cifar10_input.load_CIFAR_batch(data_dir=os.path.join(os.getcwd(), 'tmp/cifar10_data'))
 
     cifar10_train = DataSet(images=result.train_X, labels=result.train_Y)
+    cifar10_test = DataSet(images=result.test_X, labels=result.test_Y)
+    #### Another custom part: Get images and cut via tf fucntions ####
+
+    # train_X_tf = tf.concat(create_standard_tensors(result.train_X[0:500]), axis=0)
+    # train_Y_tf = tf.constant(result.train_Y[0:500])
+    # cifar10_train = DataSet(images=train_X_tf, labels=train_Y_tf)
+    # test_X_tf = create_standard_tensors(result.test_X[0:100])
+    
 
     # Calculate the gradients for each model tower.
+    
     tower_grads = []
     with tf.variable_scope(tf.get_variable_scope()):
       for i in xrange(num_gpus):
@@ -194,7 +239,10 @@ def train(num_gpus=1, batch_size=128):
             # Calculate the loss for one tower of the CIFAR model. This function
             # constructs the entire CIFAR model but shares the variables across
             # all towers.
-            loss = tower_loss(scope, image_batch, label_batch, num_gpus)
+            loss, logit = tower_loss(scope, image_batch, label_batch, num_gpus)
+
+            # Save logits so that we could build accuracy inference.
+            logits['logit_%d' % i] = logit
 
             # Reuse variables for the next tower.
             tf.get_variable_scope().reuse_variables()
@@ -207,6 +255,22 @@ def train(num_gpus=1, batch_size=128):
 
             # Keep track of the gradients across all towers.
             tower_grads.append(grads)
+
+    def get_correct_prediction_op(logits, placeholders, num_gpus=1):
+      totals = []
+      for i in xrange(num_gpus):
+        logit = logits['logit_%d' % i]
+        label = placeholders['label_%d' % i]
+        # Calculate predictions.
+        top_k_op = tf.nn.in_top_k(logit, label, 1)
+
+        # Count total top_k.
+        totals.append(tf.reduce_sum(tf.cast(top_k_op, tf.float32)))
+      return tf.add_n(totals)
+
+
+    accuracy = get_correct_prediction_op(logits, placeholders)
+    # print(accuracy)
 
     # We must calculate the mean of each gradient. Note that this is the
     # synchronization point across all towers.
@@ -260,7 +324,8 @@ def train(num_gpus=1, batch_size=128):
 
     # print(placeholders)
 
-
+    loss_lst = []
+    accuracy_lst = []
     for step in xrange(FLAGS.max_steps):
       start_time = time.time()
 
@@ -282,13 +347,13 @@ def train(num_gpus=1, batch_size=128):
         imgs_pl = get_placeholder('image_%d' % i)
         # print(imgs)
         labels_pl = get_placeholder('label_%d' % i)
-        feed_dict[imgs_pl] = batch_xs.astype(float)
+        feed_dict[imgs_pl] = batch_xs
         # print(batch_xs.astype(float).shape)
-        feed_dict[labels_pl] = batch_ys.astype(float)
+        feed_dict[labels_pl] = batch_ys
         # print(batch_ys.astype(float))
 
       # print(feed_dict)
-      print(np.sum(sess.run(grads[0][1])))
+
       _, loss_value = sess.run([train_op, loss], feed_dict=feed_dict)
       
       # print(grads[0][0])
@@ -306,12 +371,38 @@ def train(num_gpus=1, batch_size=128):
         print (format_str % (datetime.now(), step, loss_value,
                              examples_per_sec, sec_per_batch))
 
+        loss_lst.append((step, loss_value))
+
       if step % 100 == 0:
         summary_str = sess.run(summary_op, feed_dict=feed_dict)
         summary_writer.add_summary(summary_str, step)
 
+        test_batches = 10000 // batch_size
+        total = 0
+        for i in xrange(test_batches):
+          test_images, test_labels = cifar10_test.next_batch(batch_size)
+          test_dict = {}
+          for j in xrange(num_gpus):
+            mini_batch_size = batch_size // num_gpus
+            start_index = int(mini_batch_size * j)
+            end_index = int(mini_batch_size * (j+1))
+            batch_xs = test_images[start_index:end_index]
+            batch_ys = test_labels[start_index:end_index]
+            imgs_pl = get_placeholder('image_%d' % j)
+            labels_pl = get_placeholder('label_%d' % j)
+            test_dict[labels_pl] = batch_ys 
+            test_dict[imgs_pl] = batch_xs
+
+          # print(test_dict)
+          total += sess.run(accuracy, feed_dict=test_dict)
+        print('step %d, accuracy: %.6f' % (step, total / 9984))
+        accuracy_lst.append((step, total / 9984))
+
+
       # Save the model checkpoint periodically.
       if step % 1000 == 0 or (step + 1) == FLAGS.max_steps:
+        print(accuracy_lst)
+        print(loss_lst)
         checkpoint_path = os.path.join(FLAGS.train_dir, 'model.ckpt')
         saver.save(sess, checkpoint_path, global_step=step)
 
