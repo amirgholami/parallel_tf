@@ -9,6 +9,10 @@ See fc_models/synchronized_sgd.py for fully controlled sync:
 See customCifarInputs for sync cifar-10 training with multiply gpu. Similar to above.
 
 See process_group experiment in each model's folder.
+
+![Alt text](./sync_cifar10_naive_cnn.png?raw=true "Cifar-10 sync training")
+
+![Alt text](./async_sync_group_conv.png?raw=true "Title")
   
 This software has been developed and is maintained by the PALLAS group  
 at the ASPIRE Lab in the University of California, Berkeley.
