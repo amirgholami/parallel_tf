@@ -13,7 +13,9 @@ See process_group experiment in each model's folder.
 ![Alt text](./sync_cifar10_naive_cnn.png?raw=true "Cifar-10 sync training")
 
 ![Alt text](./async_sync_group_conv.png?raw=true "Title")
-  
+
+Examplify: async training failed to converge to the depth of sync training
+![Alt text](./convergence_depth.png?raw=true "Convergence level in detail")  
 This software has been developed and is maintained by the PALLAS group  
 at the ASPIRE Lab in the University of California, Berkeley.
 
