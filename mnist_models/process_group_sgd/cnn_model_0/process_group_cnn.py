@@ -2,7 +2,7 @@ import math
 import tensorflow as tf 
 import os
 import numpy as np
-from multiprocessing import Process, Lock
+import threading
 from tensorflow.examples.tutorials.mnist import input_data
 
 tf.app.flags.DEFINE_string("ps_hosts", "",
@@ -154,18 +154,11 @@ def get_ps_task_id(worker_id, server_num):
   # Round robin.
   return worker_id % server_num
 
-def run_model(lock, job_name, task_index):
-
-  FLAGS.job_name = job_name
-  FLAGS.task_index = task_index
-
-  # Fix seed.
-  tf.set_random_seed(seeds[FLAGS.task_index])
-  np.random.seed(seeds[FLAGS.task_index])
+def run_model(job_name, task_index, barrier, lock):
 
   ####### Create cluster ########
   train_log_path = os.path.join(os.getcwd(), 'train_logs')
-  if FLAGS.task_index == 0 and FLAGS.job_name == "ps":
+  if task_index == 0 and job_name == "ps":
     import shutil
     if os.path.isdir(train_log_path):
       shutil.rmtree(train_log_path)
@@ -175,7 +168,7 @@ def run_model(lock, job_name, task_index):
   server_hosts = ["localhost:22222", "localhost:22223", "localhost:22224"]
 
   cluster = tf.train.ClusterSpec({"ps": server_hosts, "worker": worker_hosts})
-  server = tf.train.Server(cluster, job_name=FLAGS.job_name, task_index=FLAGS.task_index)
+  server = tf.train.Server(cluster, job_name=job_name, task_index=task_index)
 
   worker_num = len(worker_hosts)
 
@@ -183,12 +176,12 @@ def run_model(lock, job_name, task_index):
   server_num = ps_server_id = len(server_hosts) - 1
 
   # Get ps id for this worker. (0,2) (1,3)
-  ps_id = get_ps_task_id(FLAGS.task_index, server_num)
+  ps_id = get_ps_task_id(task_index, server_num)
   group_size = worker_num // server_num
-  is_group_chief = (FLAGS.task_index < server_num)
-  is_chief = (FLAGS.task_index == 0)
+  is_group_chief = (task_index < server_num)
+  is_chief = (task_index == 0)
 
-  # print(ps_id, group_size, FLAGS.task_index, is_group_chief)
+  # print(ps_id, group_size, task_index, is_group_chief)
 
   # Build central ps.
   with tf.device("/job:ps/task:%d" % ps_server_id):
@@ -218,7 +211,7 @@ def run_model(lock, job_name, task_index):
 
     # Assign extra workers if not divisible.
     print(group_num_replicas)
-    if FLAGS.task_index > group_num_replicas * server_num:
+    if task_index > group_num_replicas * server_num:
       group_num_replicas += 1
 
     sync_opt = tf.train.SyncReplicasOptimizer(opt, replicas_to_aggregate=group_num_replicas,
@@ -235,16 +228,16 @@ def run_model(lock, job_name, task_index):
 
     # This step only carry out by the chief, after grad being computed.
     # accumulate_op = accumulate_gradient_to_var(ps_id, grad, opt, None)
-    update_op, zero_copy_op, fetch_ps_op = update_var(ps_id, ps_server_id)
+    _, _, fetch_ps_op = update_var(ps_id, ps_server_id)
     assign_to_ps_op = apply_gradient_to_ps(ps_server_id, grad, opt)
 
     report = tf.report_uninitialized_variables()
 
-  if FLAGS.job_name == "ps":
+  if job_name == "ps":
     server.join()
 
   with tf.device(tf.train.replica_device_setter(
-    worker_device="/job:worker/task:%d" % FLAGS.task_index,
+    worker_device="/job:worker/task:%d" % task_index,
     ps_device="/job:ps/task:%d" % ps_id, 
     cluster=cluster)):
     saver = tf.train.Saver()
@@ -258,6 +251,7 @@ def run_model(lock, job_name, task_index):
                            global_step=global_step,
                            init_op=init_op,
                            summary_op=summary_op,
+                           recovery_wait_secs=0,
                            save_model_secs=600)
 
     mnist = input_data.read_data_sets(FLAGS.data_dir, one_hot=True)
@@ -296,13 +290,15 @@ def run_model(lock, job_name, task_index):
         sess.run(assign_to_ps_op, feed_dict=train_feed)
         sess.run([fetch_ps_op])
         lock.release()
+
+      barrier.wait()
         
 
       if step % 5 == 0:
-        print("Worker %d: training step %d done (global step: %d)" % (FLAGS.task_index, local_step, step))
+        print("Worker %d: training step %d done (global step: %d)" % (task_index, local_step, step))
         train_accuracy = sess.run(ps_accuracy, feed_dict={ps_x: batch_xs,
                                             ps_y_: batch_ys, ps_keep_prob:1.0})
-        print("On task %d On iteration %d ps it reaches %f accuracy" % (FLAGS.task_index, step, train_accuracy))
+        print("On task %d On iteration %d ps it reaches %f accuracy" % (task_index, step, train_accuracy))
         
         
       if step % 100 == 0 and step != 0:
@@ -311,23 +307,47 @@ def run_model(lock, job_name, task_index):
         test_accuracy = sess.run(ps_accuracy, feed_dict={ps_x: mnist.test.images,
                                             ps_y_: mnist.test.labels, ps_keep_prob:1.0})
         lock.release()
-        print("On task %d On iteration %d ps it reaches %f accuracy" % (FLAGS.task_index, step, test_accuracy))
+        print("On task %d On iteration %d ps it reaches %f accuracy" % (task_index, step, test_accuracy))
         step_and_accuracy.append((step, test_accuracy))
       if step % 2000 == 0 and is_chief:
         print(step_and_accuracy)
 
 def main():
 
-  lock = Lock()
-  lock = Lock()
-  Process(target=run_model, args=(lock, "ps", 0, )).start()
-  Process(target=run_model, args=(lock, "ps", 1, )).start()
-  Process(target=run_model, args=(lock, "ps", 2, )).start()
+  # lock = Lock()
+  # lock = Lock()
+  # Process(target=run_model, args=(lock, "ps", 0, )).start()
+  # Process(target=run_model, args=(lock, "ps", 1, )).start()
+  # Process(target=run_model, args=(lock, "ps", 2, )).start()
 
-  Process(target=run_model, args=(lock, "worker", 0, )).start()
-  Process(target=run_model, args=(lock, "worker", 1, )).start()
-  Process(target=run_model, args=(lock, "worker", 2, )).start()
-  Process(target=run_model, args=(lock, "worker", 3, )).start()
+  # Process(target=run_model, args=(lock, "worker", 0, )).start()
+  # Process(target=run_model, args=(lock, "worker", 1, )).start()
+  # Process(target=run_model, args=(lock, "worker", 2, )).start()
+  # Process(target=run_model, args=(lock, "worker", 3, )).start()
+
+  import random
+  # Fix random seed to produce exactly the same results.
+  random.seed(0)
+  tf.set_random_seed(0)
+  np.random.seed(0)
+
+  threads = []
+  b1 = threading.Barrier(parties=2)
+  b2 = threading.Barrier(parties=2)
+  l = threading.Lock()
+  for i in [0, 2]:
+      threads.append(threading.Thread(target=run_model, args=("worker", i, b1, l, )))
+  threads.append(threading.Thread(target=run_model, args=("ps", 1, None, None, )))
+
+  for i in [1, 3]:
+      threads.append(threading.Thread(target=run_model, args=("worker", i, b2, l, )))
+  threads.append(threading.Thread(target=run_model, args=("ps", 2, None, None, )))
+
+  threads.append(threading.Thread(target=run_model, args=("ps", 0, None, None)))
+
+  
+  for t in threads:
+    t.start()
 
 
 if __name__ == "__main__":
