@@ -52,7 +52,7 @@ def tower_loss(scope, images, labels, num_gpus, batch_size=128):
 
   return total_loss, logits
 
-def train(job_name, task_index, num_gpus=1, batch_size=128):
+def train(job_name, task_index, num_gpus=2, batch_size=128):
   """Train CIFAR-10 for a number of steps."""
   worker_hosts = ["localhost:22227"]
   server_hosts = ["localhost:22222"]
@@ -73,6 +73,9 @@ def train(job_name, task_index, num_gpus=1, batch_size=128):
   cpu_idx = 0
   ps_idx = 0
 
+  with tf.device('/job:ps/task:%d/cpu:%d' % (ps_idx, cpu_idx)):
+    global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
+        
   if job_name == "ps":
     server.join()
 
@@ -100,7 +103,6 @@ def train(job_name, task_index, num_gpus=1, batch_size=128):
         decay_steps = int(num_batches_per_epoch * cifar10.NUM_EPOCHS_PER_DECAY)
 
         # Decay the learning rate exponentially
-        global_step = tf.get_variable('global_step', [], initializer=tf.constant_initializer(0), trainable=False)
         lr = tf.train.exponential_decay(cifar10.INITIAL_LEARNING_RATE,
                                         global_step,
                                         decay_steps,
@@ -147,7 +149,7 @@ def train(job_name, task_index, num_gpus=1, batch_size=128):
     # import pdb; pdb.set_trace()
     sv = tf.train.Supervisor(is_chief=(task_index == 0),
                       init_op=init,
-                      logdir="./tmp",
+                      logdir="./tmp/cifar10_train",
                       recovery_wait_secs=0,
                       save_model_secs=600)
     # No local init...
@@ -169,7 +171,7 @@ def train(job_name, task_index, num_gpus=1, batch_size=128):
       #### Prepare input. ####
       feed_dict = {}
       images, labels = cifar10_train.next_batch(batch_size)
-
+      import pdb; pdb.set_trace()
       mini_batch_size = batch_size // num_gpus
       start_index = int(mini_batch_size * task_index)
       end_index = int(mini_batch_size * (task_index+1))
@@ -236,7 +238,7 @@ def main():
   num_gpus = 1
   threads = []
   for i in range(num_gpus):
-    threads.append(threading.Thread(target=train, args=("worker", i, )))
+    threads.append(threading.Thread(target=train, args=("worker", i, num_gpus)))
   threads.append(threading.Thread(target=train, args=("ps", 0)))
 
   for t in threads:
@@ -244,5 +246,3 @@ def main():
 
 if __name__ == "__main__":
   main()
-      
-
