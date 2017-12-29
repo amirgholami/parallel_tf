@@ -18,8 +18,3 @@ Examplify: async training failed to converge to the depth of sync training
 ![Alt text](./sync_async_cifar10.png?raw=true "Title")
 
 ![Alt text](./convergence_depth.png?raw=true "Convergence level in detail")  
-This software has been developed and is maintained by the PALLAS group  
-at the ASPIRE Lab in the University of California, Berkeley.
-
-More information please visit: 
-http://aspire.eecs.berkeley.edu
